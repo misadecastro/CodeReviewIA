@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet --version)",
+      "Bash(dotnet --list-sdks)",
+      "Bash(dotnet nuget list source)",
+      "Bash(dotnet search \"System.CommandLine\" --take 3)",
+      "Bash(curl -s \"https://api.nuget.org/v3/registration5-gz-semver2/system.commandline/index.json\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); items=d.get\\(''items'',[]\\); [print\\(p[''catalogEntry''][''version'']\\) for i in items for p in i.get\\(''items'',[]\\) if ''beta'' in p[''catalogEntry''][''version''] or ''2.0'' in p[''catalogEntry''][''version'']]\")",
+      "Bash(dotnet restore src/CodeReviewIA/CodeReviewIA.csproj)",
+      "Bash(dotnet build src/CodeReviewIA/CodeReviewIA.csproj)"
+    ]
+  }
+}

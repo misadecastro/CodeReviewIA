@@ -1,0 +1,65 @@
+## .NET / C#
+
+# Build outputs
+bin/
+obj/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Visual Studio
+.vs/
+*.rsuser
+
+# Rider
+.idea/
+
+# VS Code
+.vscode/
+
+# Test results
+TestResults/
+coverage/
+*.trx
+*.coveragexml
+
+# Publish output
+publish/
+**/publish/
+
+# Entity Framework migrations (descomente se quiser ignorar)
+# Migrations/
+
+## Segredos e configurações sensíveis
+
+# launchSettings contém args de debug com PAT, URLs e credenciais
+**/Properties/launchSettings.json
+
+# Segredos do dotnet user-secrets
+secrets.json
+
+# Variáveis de ambiente
+.env
+.env.*
+
+## Sistema operacional
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
