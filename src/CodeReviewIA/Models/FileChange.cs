@@ -27,4 +27,7 @@ public sealed class ChangeItem
 
     [JsonPropertyName("isFolder")]
     public bool IsFolder { get; set; }
+
+    [JsonPropertyName("url")]
+    public string Url { get; set; } = string.Empty;
 }

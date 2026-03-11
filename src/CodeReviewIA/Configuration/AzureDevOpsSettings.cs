@@ -8,8 +8,14 @@ public sealed class AzureDevOpsSettings
 
     public string OrganizationUrl { get; set; } = string.Empty;
     public string Project { get; set; } = string.Empty;
+    public string RepositoryName { get; set; } = string.Empty;
+    /// <summary>GUID do repositorio (usado no body do HierarchyQuery)</summary>
     public string RepositoryId { get; set; } = string.Empty;
     public string PersonalAccessToken { get; set; } = string.Empty;
+    /// <summary>GUID da organizacao/host (serviceHost no HierarchyQuery)</summary>
+    public string ServiceHostId { get; set; } = string.Empty;
+    /// <summary>Diretorio base onde os arquivos JSON de saida serao salvos</summary>
+    public string OutputDirectory { get; set; } = string.Empty;
 
     public string GetAuthorizationHeader()
     {
@@ -27,9 +33,9 @@ public sealed class AzureDevOpsSettings
             throw new InvalidOperationException(
                 "Project nao configurado. Use appsettings.json, variavel de ambiente AZUREDEVOPS__PROJECT ou --project.");
 
-        if (string.IsNullOrWhiteSpace(RepositoryId))
+        if (string.IsNullOrWhiteSpace(RepositoryName))
             throw new InvalidOperationException(
-                "RepositoryId nao configurado. Use appsettings.json, variavel de ambiente AZUREDEVOPS__REPOSITORYID ou --repo.");
+                "RepositoryName nao configurado. Use appsettings.json, variavel de ambiente AZUREDEVOPS__REPOSITORYNAME ou --repo.");
 
         if (string.IsNullOrWhiteSpace(PersonalAccessToken))
             throw new InvalidOperationException(

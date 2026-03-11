@@ -10,7 +10,21 @@ public interface IAzureDevOpsService
 
     Task<List<ChangeEntry>> GetPullRequestChangedFilesAsync(int prId, int iterationId, CancellationToken ct = default);
 
-    Task<FileDiffResponse> GetFileDiffAsync(string baseCommit, string targetCommit, string filePath, CancellationToken ct = default);
+    /// <summary>
+    /// Obtém o diff de um arquivo via endpoint HierarchyQuery.
+    /// Os blocos retornados já contêm oLines (antes) e mLines (depois).
+    /// </summary>
+    Task<FileDiffResponse> GetFileDiffFromHierarchyAsync(
+        string originalCommit,
+        string modifiedCommit,
+        string filePath,
+        int prId,
+        string repositoryName,
+        CancellationToken ct = default);
 
-    Task<string> GetFileContentAsync(string filePath, string commitId, CancellationToken ct = default);
+    /// <summary>Retorna o conteudo bruto de um arquivo em um commit especifico.</summary>
+    Task<byte[]> GetFileContentAsync(string filePath, string commitId, CancellationToken ct = default);
+
+    /// <summary>Retorna os work items vinculados a uma PR com id, titulo e descricao.</summary>
+    Task<List<WorkItemOutput>> GetPullRequestWorkItemsAsync(int prId, CancellationToken ct = default);
 }

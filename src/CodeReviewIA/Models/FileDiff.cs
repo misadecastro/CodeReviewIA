@@ -32,6 +32,14 @@ public sealed class DiffBlock
     [JsonPropertyName("oLinesCount")]
     public int OriginalLinesCount { get; set; }
 
+    /// <summary>Linhas da versao original (antes da alteracao)</summary>
+    [JsonPropertyName("oLines")]
+    public List<string> OLines { get; set; } = [];
+
+    /// <summary>Linhas da versao modificada (apos a alteracao)</summary>
+    [JsonPropertyName("mLines")]
+    public List<string> MLines { get; set; } = [];
+
     [JsonPropertyName("truncatedBefore")]
     public bool TruncatedBefore { get; set; }
 

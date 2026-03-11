@@ -25,8 +25,20 @@ public sealed class PullRequestDetails
     [JsonPropertyName("targetRefName")]
     public string TargetRefName { get; set; } = string.Empty;
 
+    [JsonPropertyName("repository")]
+    public GitRepository? Repository { get; set; }
+
     public string SourceBranch => SourceRefName.Replace("refs/heads/", string.Empty);
     public string TargetBranch => TargetRefName.Replace("refs/heads/", string.Empty);
+}
+
+public sealed class GitRepository
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
 }
 
 public sealed class IdentityRef

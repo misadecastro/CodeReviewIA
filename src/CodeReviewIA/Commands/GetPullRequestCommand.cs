@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.Text.Json;
 using CodeReviewIA.Configuration;
 using CodeReviewIA.Models;
 using CodeReviewIA.Services;
@@ -9,7 +10,12 @@ namespace CodeReviewIA.Commands;
 public static class GetPullRequestCommand
 {
     private const int MaxDiffFiles = 20;
-    private const int MaxLinesNewOrDeleted = 50;
+
+    private static readonly JsonSerializerOptions JsonOutputOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
 
     public static Command Build(IAzureDevOpsService service, AzureDevOpsSettings settings)
     {
@@ -28,11 +34,23 @@ public static class GetPullRequestCommand
 
         var repoOption = new Option<string?>(
             aliases: ["--repo"],
-            description: "ID ou nome do repositorio.");
+            description: "Nome do repositorio.");
 
         var patOption = new Option<string?>(
             aliases: ["--pat"],
             description: "Personal Access Token do Azure DevOps.");
+
+        var serviceHostOption = new Option<string?>(
+            aliases: ["--service-host"],
+            description: "GUID da organizacao/host do Azure DevOps (serviceHost).");
+
+        var repoIdOption = new Option<string?>(
+            aliases: ["--repo-id"],
+            description: "GUID do repositorio (usado no body do HierarchyQuery).");
+
+        var outputOption = new Option<string?>(
+            aliases: ["--output"],
+            description: "Diretorio de saida para o arquivo JSON. Sobrescreve OutputDirectory do appsettings.");
 
         var command = new Command("get-pr", "Exibe detalhes de uma Pull Request do Azure DevOps.")
         {
@@ -40,21 +58,26 @@ public static class GetPullRequestCommand
             orgOption,
             projectOption,
             repoOption,
-            patOption
+            patOption,
+            serviceHostOption,
+            repoIdOption,
+            outputOption
         };
 
-        command.SetHandler(async (prId, org, project, repo, pat) =>
+        command.SetHandler(async (prId, org, project, repo, pat, serviceHost, repoId, output) =>
         {
-            // Argumentos CLI sobrescrevem o appsettings.json
-            if (!string.IsNullOrWhiteSpace(org))     settings.OrganizationUrl = org;
-            if (!string.IsNullOrWhiteSpace(project)) settings.Project = project;
-            if (!string.IsNullOrWhiteSpace(repo))    settings.RepositoryId = repo;
-            if (!string.IsNullOrWhiteSpace(pat))     settings.PersonalAccessToken = pat;
+            if (!string.IsNullOrWhiteSpace(org))          settings.OrganizationUrl     = org;
+            if (!string.IsNullOrWhiteSpace(project))      settings.Project             = project;
+            if (!string.IsNullOrWhiteSpace(repo))         settings.RepositoryName      = repo;
+            if (!string.IsNullOrWhiteSpace(pat))          settings.PersonalAccessToken = pat;
+            if (!string.IsNullOrWhiteSpace(serviceHost))  settings.ServiceHostId       = serviceHost;
+            if (!string.IsNullOrWhiteSpace(repoId))       settings.RepositoryId        = repoId;
+            if (!string.IsNullOrWhiteSpace(output))       settings.OutputDirectory     = output;
 
             try
             {
                 settings.Validate();
-                await ExecuteAsync(service, prId);
+                await ExecuteAsync(service, settings, prId);
             }
             catch (InvalidOperationException ex)
             {
@@ -72,12 +95,12 @@ public static class GetPullRequestCommand
                 Environment.Exit(1);
             }
         },
-        prIdOption, orgOption, projectOption, repoOption, patOption);
+        prIdOption, orgOption, projectOption, repoOption, patOption, serviceHostOption, repoIdOption, outputOption);
 
         return command;
     }
 
-    private static async Task ExecuteAsync(IAzureDevOpsService service, int prId)
+    private static async Task ExecuteAsync(IAzureDevOpsService service, AzureDevOpsSettings settings, int prId)
     {
         // 1. Detalhes da PR
         PullRequestDetails pr = null!;
@@ -88,7 +111,7 @@ public static class GetPullRequestCommand
 
         RenderPrPanel(pr);
 
-        // 2. Iteracoes
+        // 2. Iteracoes — usa a ultima para obter os commits de base e source
         List<PullRequestIteration> iterations = null!;
         await AnsiConsole.Status().StartAsync("Buscando iteracoes...", async _ =>
         {
@@ -106,10 +129,10 @@ public static class GetPullRequestCommand
         var commonCommit = lastIteration.CommonRefCommit?.CommitId ?? string.Empty;
         var targetCommit = lastIteration.TargetRefCommit?.CommitId ?? string.Empty;
 
-        // Base para diffs: usa o commit comum (merge base) quando disponivel
+        // originalVersion = merge base (commonRef); fallback para targetRef
         var baseCommit = string.IsNullOrWhiteSpace(commonCommit) ? targetCommit : commonCommit;
 
-        // 3. Arquivos alterados
+        // 3. Arquivos alterados (paginado, apenas blobs)
         List<ChangeEntry> changes = null!;
         await AnsiConsole.Status().StartAsync($"Buscando arquivos alterados (iteracao {lastIteration.Id})...", async _ =>
         {
@@ -118,7 +141,19 @@ public static class GetPullRequestCommand
 
         RenderChangesTable(changes);
 
-        // 4. Diffs
+        // 3b. Work items vinculados
+        List<WorkItemOutput> workItems = [];
+        await AnsiConsole.Status().StartAsync("Buscando work items vinculados...", async _ =>
+        {
+            workItems = await service.GetPullRequestWorkItemsAsync(prId);
+        });
+
+        if (workItems.Count > 0)
+            RenderWorkItemsTable(workItems);
+
+        // 4. Diffs via HierarchyQuery
+        var repositoryName = pr.Repository?.Name ?? settings.RepositoryName;
+
         var filesToDiff = changes
             .Where(c => c.Item != null && !c.Item.IsFolder)
             .Take(MaxDiffFiles)
@@ -127,38 +162,119 @@ public static class GetPullRequestCommand
         if (changes.Count > MaxDiffFiles)
             AnsiConsole.MarkupLine($"[grey]Exibindo diffs dos primeiros {MaxDiffFiles} de {changes.Count} arquivo(s).[/]\n");
 
+        // Coleta os diffs para exibicao e para o JSON de saida
+        var diffResults = new List<(ChangeEntry Change, FileDiffResponse Diff)>();
+
         foreach (var change in filesToDiff)
         {
             var filePath = change.Item!.Path;
-
-            FileDiffResponse? diff = null;
-            string[] baseLines = [];
-            string[] targetLines = [];
+            FileDiffResponse diff = new();
 
             await AnsiConsole.Status().StartAsync($"Carregando diff: {filePath}...", async _ =>
             {
-                if (change.ChangeType.Equals("add", StringComparison.OrdinalIgnoreCase))
+                diff = await service.GetFileDiffFromHierarchyAsync(
+                    baseCommit, sourceCommit, filePath, prId, repositoryName);
+            });
+
+            RenderFileDiff(filePath, diff);
+            diffResults.Add((change, diff));
+        }
+
+        // 5. Salva JSON e baixa arquivos (se OutputDirectory configurado)
+        if (!string.IsNullOrWhiteSpace(settings.OutputDirectory))
+            await SaveOutputAsync(service, settings.OutputDirectory, pr, workItems, changes, diffResults, sourceCommit, baseCommit);
+    }
+
+    private static async Task SaveOutputAsync(
+        IAzureDevOpsService service,
+        string outputDirectory,
+        PullRequestDetails pr,
+        List<WorkItemOutput> workItems,
+        List<ChangeEntry> changes,
+        List<(ChangeEntry Change, FileDiffResponse Diff)> diffResults,
+        string sourceCommit,
+        string baseCommit)
+    {
+        var prFolder = Path.Combine(outputDirectory, $"pr-{pr.PullRequestId}");
+        Directory.CreateDirectory(prFolder);
+
+        // 5a. Salva JSON com dados da PR
+        var diffMap = diffResults.ToDictionary(d => d.Change.Item!.Path, d => d.Diff);
+
+        var output = new PrOutput
+        {
+            Pr        = pr.PullRequestId.ToString(),
+            Titulo    = pr.Title,
+            Descricao = pr.Description ?? string.Empty,
+            Autor     = pr.CreatedBy?.DisplayName ?? string.Empty,
+            Status    = pr.Status,
+            Branch    = $"{pr.SourceBranch} -> {pr.TargetBranch}",
+            WorkItems = workItems,
+            Items     = changes
+                .Where(c => c.Item != null && !c.Item.IsFolder)
+                .Select(c =>
                 {
-                    if (!string.IsNullOrWhiteSpace(sourceCommit))
-                        targetLines = SplitLines(await service.GetFileContentAsync(filePath, sourceCommit));
-                }
-                else if (change.ChangeType.Equals("delete", StringComparison.OrdinalIgnoreCase))
+                    diffMap.TryGetValue(c.Item!.Path, out var diff);
+                    return new PrItemOutput
+                    {
+                        Arquivo    = c.Item.Path,
+                        Tipo       = c.ChangeType,
+                        Url        = c.Item.Url,
+                        Alteracoes = (diff?.Blocks ?? [])
+                            .Where(b => b.ChangeType != 0)
+                            .Select(b => new PrAlteracaoOutput
+                            {
+                                Original  = b.OLines,
+                                Alteracao = b.MLines
+                            })
+                            .ToList()
+                    };
+                })
+                .ToList()
+        };
+
+        var jsonPath = Path.Combine(prFolder, $"pr-{pr.PullRequestId}.json");
+        await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(output, JsonOutputOptions));
+        AnsiConsole.MarkupLine($"\n[green]JSON salvo em:[/] {jsonPath}");
+
+        // 5b. Baixa os arquivos alterados para a pasta da PR
+        var fileChanges = changes.Where(c => c.Item != null && !c.Item.IsFolder).ToList();
+
+        await AnsiConsole.Progress()
+            .Columns(
+                new TaskDescriptionColumn(),
+                new ProgressBarColumn(),
+                new PercentageColumn())
+            .StartAsync(async ctx =>
+            {
+                var task = ctx.AddTask("Baixando arquivos alterados", maxValue: fileChanges.Count);
+
+                foreach (var change in fileChanges)
                 {
-                    if (!string.IsNullOrWhiteSpace(baseCommit))
-                        baseLines = SplitLines(await service.GetFileContentAsync(filePath, baseCommit));
-                }
-                else
-                {
-                    diff = await service.GetFileDiffAsync(baseCommit, sourceCommit, filePath);
-                    if (!string.IsNullOrWhiteSpace(baseCommit))
-                        baseLines = SplitLines(await service.GetFileContentAsync(filePath, baseCommit));
-                    if (!string.IsNullOrWhiteSpace(sourceCommit))
-                        targetLines = SplitLines(await service.GetFileContentAsync(filePath, sourceCommit));
+                    var filePath   = change.Item!.Path;
+                    var commitId   = change.ChangeType.Equals("delete", StringComparison.OrdinalIgnoreCase)
+                        ? baseCommit
+                        : sourceCommit;
+
+                    task.Description = $"Baixando {filePath}";
+
+                    var bytes = await service.GetFileContentAsync(filePath, commitId);
+
+                    if (bytes.Length > 0)
+                    {
+                        // Remove a barra inicial do path para montar o caminho relativo
+                        var relativePath = filePath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+                        var destPath     = Path.Combine(prFolder, relativePath);
+
+                        Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                        await File.WriteAllBytesAsync(destPath, bytes);
+                    }
+
+                    task.Increment(1);
                 }
             });
 
-            RenderFileDiff(filePath, change.ChangeType, diff, baseLines, targetLines);
-        }
+        AnsiConsole.MarkupLine($"[green]Arquivos salvos em:[/] {prFolder}");
     }
 
     private static void RenderPrPanel(PullRequestDetails pr)
@@ -208,75 +324,48 @@ public static class GetPullRequestCommand
         AnsiConsole.WriteLine();
     }
 
-    private static void RenderFileDiff(
-        string filePath,
-        string changeType,
-        FileDiffResponse? diff,
-        string[] baseLines,
-        string[] targetLines)
+    private static void RenderWorkItemsTable(List<WorkItemOutput> workItems)
+    {
+        AnsiConsole.MarkupLine($"[bold]Work Items vinculados ({workItems.Count}):[/]");
+
+        var table = new Table { Border = TableBorder.Rounded };
+        table.AddColumn(new TableColumn("[bold]ID[/]").Centered());
+        table.AddColumn(new TableColumn("[bold]Titulo[/]").LeftAligned());
+        table.AddColumn(new TableColumn("[bold]Descricao[/]").LeftAligned());
+
+        foreach (var wi in workItems)
+            table.AddRow(Markup.Escape(wi.Id), Markup.Escape(wi.Titulo), Markup.Escape(wi.Descricao ?? string.Empty));
+
+        AnsiConsole.Write(table);
+        AnsiConsole.WriteLine();
+    }
+
+    private static void RenderFileDiff(string filePath, FileDiffResponse diff)
     {
         AnsiConsole.MarkupLine($"[bold cyan]--- {Markup.Escape(filePath)} ---[/]");
 
-        if (changeType.Equals("add", StringComparison.OrdinalIgnoreCase))
+        var changedBlocks = diff.Blocks.Where(b => b.ChangeType != 0).ToList();
+
+        if (changedBlocks.Count == 0)
         {
-            var lines = targetLines.Take(MaxLinesNewOrDeleted).ToArray();
-            foreach (var line in lines)
-                AnsiConsole.MarkupLine($"[green]+ {Markup.Escape(line)}[/]");
-
-            if (targetLines.Length > MaxLinesNewOrDeleted)
-                AnsiConsole.MarkupLine($"[grey]... ({targetLines.Length - MaxLinesNewOrDeleted} linhas omitidas)[/]");
-
+            AnsiConsole.MarkupLine("[grey](sem alteracoes detectadas)[/]");
             AnsiConsole.WriteLine();
             return;
         }
 
-        if (changeType.Equals("delete", StringComparison.OrdinalIgnoreCase))
+        foreach (var block in changedBlocks)
         {
-            var lines = baseLines.Take(MaxLinesNewOrDeleted).ToArray();
-            foreach (var line in lines)
-                AnsiConsole.MarkupLine($"[red]- {Markup.Escape(line)}[/]");
-
-            if (baseLines.Length > MaxLinesNewOrDeleted)
-                AnsiConsole.MarkupLine($"[grey]... ({baseLines.Length - MaxLinesNewOrDeleted} linhas omitidas)[/]");
-
-            AnsiConsole.WriteLine();
-            return;
-        }
-
-        // Edit / Rename: usa blocos do diff
-        if (diff == null || diff.Blocks.Count == 0)
-        {
-            AnsiConsole.MarkupLine("[grey](sem alteracoes detectadas no diff)[/]");
-            AnsiConsole.WriteLine();
-            return;
-        }
-
-        foreach (var block in diff.Blocks)
-        {
-            if (block.ChangeType == 0) continue; // contexto nao alterado
-
             AnsiConsole.MarkupLine(
                 $"[grey]@@ -{block.OriginalLineStart},{block.OriginalLinesCount} " +
                 $"+{block.ModifiedLineStart},{block.ModifiedLinesCount} @@[/]");
 
-            for (int i = 0; i < block.OriginalLinesCount; i++)
-            {
-                var idx = block.OriginalLineStart - 1 + i;
-                if (idx >= 0 && idx < baseLines.Length)
-                    AnsiConsole.MarkupLine($"[red]- {Markup.Escape(baseLines[idx])}[/]");
-            }
+            foreach (var line in block.OLines)
+                AnsiConsole.MarkupLine($"[red]- {Markup.Escape(line)}[/]");
 
-            for (int i = 0; i < block.ModifiedLinesCount; i++)
-            {
-                var idx = block.ModifiedLineStart - 1 + i;
-                if (idx >= 0 && idx < targetLines.Length)
-                    AnsiConsole.MarkupLine($"[green]+ {Markup.Escape(targetLines[idx])}[/]");
-            }
+            foreach (var line in block.MLines)
+                AnsiConsole.MarkupLine($"[green]+ {Markup.Escape(line)}[/]");
         }
 
         AnsiConsole.WriteLine();
     }
-
-    private static string[] SplitLines(string content) =>
-        content.Split('\n');
 }
